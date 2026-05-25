@@ -1,0 +1,180 @@
+{
+  "name": "cadencia-renovacao-init",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cadencia-renovacao",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf1-webhook",
+      "name": "Webhook (Notion → start)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 320],
+      "webhookId": "cadencia-renovacao-init"
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "get",
+        "pageId": "={{ $json.body.pageId }}"
+      },
+      "id": "wf1-notion-get",
+      "name": "Notion: Get Cliente",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [480, 320],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const page = $input.first().json;\nconst props = page.property || page.properties || {};\n\nfunction getProp(name) {\n  const p = props[name];\n  if (!p) return null;\n  if (p.type === 'title') return (p.title?.[0]?.plain_text) || null;\n  if (p.type === 'rich_text') return (p.rich_text?.[0]?.plain_text) || null;\n  if (p.type === 'phone_number') return p.phone_number || null;\n  if (p.type === 'select') return p.select?.name || null;\n  if (p.type === 'number') return p.number;\n  if (p.type === 'date') return p.date?.start || null;\n  if (p.type === 'formula') return p.formula?.string || p.formula?.number || null;\n  if (p.type === 'checkbox') return p.checkbox;\n  return null;\n}\n\nconst phoneRaw = getProp('Telefone WhatsApp') || '';\nconst phone = String(phoneRaw).replace(/\\D/g, '');\nconst nome = getProp('Nome') || getProp('Cliente') || 'cliente';\nconst plano = getProp('Plano') || '';\nconst valor = getProp('Valor Renovação') || '';\nconst vencimento = getProp('Vencimento') || '';\nconst linkProposta = getProp('Link Proposta') || '';\nconst idRenovacao = getProp('ID Renovação') || page.id;\n\nconst m1 = `Olá ${nome}, aqui é da Realiza Consultoria. \\n\\nSua renovação do plano ${plano} está pronta` +\n  (valor ? ` no valor de ${valor}` : '') +\n  (vencimento ? `, com vencimento em ${vencimento}` : '') +\n  `.${linkProposta ? `\\n\\nProposta: ${linkProposta}` : ''}` +\n  `\\n\\nPosso seguir com a renovação? Responda *sim* para confirmar ou me conte se prefere conversar antes.`;\n\nreturn [{\n  json: {\n    pageId: page.id,\n    phone,\n    nome,\n    plano,\n    valor,\n    vencimento,\n    linkProposta,\n    idRenovacao,\n    message: m1,\n    hasPhone: phone.length >= 10\n  }\n}];"
+      },
+      "id": "wf1-build",
+      "name": "Monta M1 + valida telefone",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "phone-check",
+              "leftValue": "={{ $json.hasPhone }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf1-if-phone",
+      "name": "IF Telefone OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [960, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.z-api.io/instances/{{ $env.ZAPI_INSTANCE }}/token/{{ $env.ZAPI_TOKEN }}/send-text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Client-Token", "value": "={{ $env.ZAPI_CLIENT_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"phone\": \"{{ $json.phone }}\",\n  \"message\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {}
+      },
+      "id": "wf1-zapi",
+      "name": "Z-API: send-text M1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 220]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $('Monta M1 + valida telefone').item.json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Etapa Cadência WPP|number",
+              "numberValue": 1
+            },
+            {
+              "key": "Próximo Disparo WPP|date",
+              "date": "={{ $now.plus({ days: 3 }).toISODate() }}"
+            }
+          ]
+        }
+      },
+      "id": "wf1-notion-update",
+      "name": "Notion: marca Etapa=1, +3d",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [1440, 220],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"ok\",\n  \"pageId\": \"{{ $('Monta M1 + valida telefone').item.json.pageId }}\",\n  \"etapa\": 1\n}"
+      },
+      "id": "wf1-respond-ok",
+      "name": "Responde 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1680, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 422,
+        "responseBody": "={\n  \"status\": \"skipped\",\n  \"reason\": \"telefone_ausente\",\n  \"pageId\": \"{{ $('Monta M1 + valida telefone').item.json.pageId }}\"\n}"
+      },
+      "id": "wf1-respond-skip",
+      "name": "Responde 422 (sem telefone)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1200, 460]
+    }
+  ],
+  "connections": {
+    "Webhook (Notion → start)": {
+      "main": [[{ "node": "Notion: Get Cliente", "type": "main", "index": 0 }]]
+    },
+    "Notion: Get Cliente": {
+      "main": [[{ "node": "Monta M1 + valida telefone", "type": "main", "index": 0 }]]
+    },
+    "Monta M1 + valida telefone": {
+      "main": [[{ "node": "IF Telefone OK?", "type": "main", "index": 0 }]]
+    },
+    "IF Telefone OK?": {
+      "main": [
+        [{ "node": "Z-API: send-text M1", "type": "main", "index": 0 }],
+        [{ "node": "Responde 422 (sem telefone)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Z-API: send-text M1": {
+      "main": [[{ "node": "Notion: marca Etapa=1, +3d", "type": "main", "index": 0 }]]
+    },
+    "Notion: marca Etapa=1, +3d": {
+      "main": [[{ "node": "Responde 200", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "renovacao" },
+    { "name": "whatsapp" },
+    { "name": "zapi" }
+  ]
+}

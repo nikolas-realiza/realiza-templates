@@ -1,0 +1,165 @@
+{
+  "name": "cadencia-renovacao-daily",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 9 * * *" }
+          ]
+        }
+      },
+      "id": "wf2-cron",
+      "name": "Schedule 09:00 BRT",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": "REPLACE_NOTION_DATABASE_ID",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "key": "Status Renovação|select",
+              "condition": "equals",
+              "selectValue": "Em renovação"
+            },
+            {
+              "key": "Aceite WPP|checkbox",
+              "condition": "equals",
+              "checkboxValue": false
+            },
+            {
+              "key": "Próximo Disparo WPP|date",
+              "condition": "on_or_before",
+              "date": "={{ $now.toISODate() }}"
+            }
+          ]
+        }
+      },
+      "id": "wf2-notion-query",
+      "name": "Notion: Em renovação + vencidos",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [480, 320],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst out = [];\n\nfunction getProp(props, name) {\n  const p = props[name];\n  if (!p) return null;\n  if (p.type === 'title') return (p.title?.[0]?.plain_text) || null;\n  if (p.type === 'rich_text') return (p.rich_text?.[0]?.plain_text) || null;\n  if (p.type === 'phone_number') return p.phone_number || null;\n  if (p.type === 'select') return p.select?.name || null;\n  if (p.type === 'number') return p.number;\n  if (p.type === 'date') return p.date?.start || null;\n  if (p.type === 'formula') return p.formula?.string || p.formula?.number || null;\n  if (p.type === 'checkbox') return p.checkbox;\n  return null;\n}\n\nfor (const it of items) {\n  const page = it.json;\n  const props = page.property || page.properties || {};\n  const phoneRaw = getProp(props, 'Telefone WhatsApp') || '';\n  const phone = String(phoneRaw).replace(/\\D/g, '');\n  if (phone.length < 10) continue;\n\n  const etapa = Number(getProp(props, 'Etapa Cadência WPP') || 0);\n  const nome = getProp(props, 'Nome') || getProp(props, 'Cliente') || 'cliente';\n  const plano = getProp(props, 'Plano') || '';\n  const valor = getProp(props, 'Valor Renovação') || '';\n  const vencimento = getProp(props, 'Vencimento') || '';\n  const linkProposta = getProp(props, 'Link Proposta') || '';\n\n  let nextEtapa = etapa;\n  let nextDate = null;\n  let nextStatus = null;\n  let message = null;\n\n  if (etapa === 1) {\n    nextEtapa = 2;\n    nextDate = $now.plus({ days: 4 }).toISODate();\n    message = `Oi ${nome}, passando para reforçar a renovação do ${plano}` +\n      (valor ? ` (${valor})` : '') +\n      (vencimento ? `, com vencimento em ${vencimento}` : '') +\n      `.${linkProposta ? `\\n\\nProposta: ${linkProposta}` : ''}` +\n      `\\n\\nConsegue me dar um *sim* ou *não* para destravarmos por aqui?`;\n  } else if (etapa === 2) {\n    nextEtapa = 3;\n    nextDate = null;\n    nextStatus = 'Sem resposta';\n    message = `${nome}, esta é nossa última tentativa por aqui antes de pausar a renovação do ${plano}.` +\n      `\\n\\nSe quiser seguir, basta responder *sim* — caso contrário, posso te chamar por outro canal?`;\n  } else {\n    continue;\n  }\n\n  out.push({\n    json: {\n      pageId: page.id,\n      phone,\n      etapaAtual: etapa,\n      proximaEtapa: nextEtapa,\n      proximoDisparo: nextDate,\n      novoStatus: nextStatus,\n      message\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "wf2-plan",
+      "name": "Planeja envios (etapa/mensagem)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 320]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "wf2-loop",
+      "name": "Loop por cliente",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [960, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.z-api.io/instances/{{ $env.ZAPI_INSTANCE }}/token/{{ $env.ZAPI_TOKEN }}/send-text",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Client-Token", "value": "={{ $env.ZAPI_CLIENT_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"phone\": \"{{ $json.phone }}\",\n  \"message\": {{ JSON.stringify($json.message) }}\n}",
+        "options": {}
+      },
+      "id": "wf2-zapi",
+      "name": "Z-API: send-text M2/M3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $('Loop por cliente').item.json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            {
+              "key": "Etapa Cadência WPP|number",
+              "numberValue": "={{ $('Loop por cliente').item.json.proximaEtapa }}"
+            },
+            {
+              "key": "Próximo Disparo WPP|date",
+              "date": "={{ $('Loop por cliente').item.json.proximoDisparo }}"
+            },
+            {
+              "key": "Status Renovação|select",
+              "selectValue": "={{ $('Loop por cliente').item.json.novoStatus || $('Loop por cliente').item.json.novoStatus === '' ? $('Loop por cliente').item.json.novoStatus : 'Em renovação' }}"
+            }
+          ]
+        }
+      },
+      "id": "wf2-notion-update",
+      "name": "Notion: avança etapa",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [1440, 320],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 09:00 BRT": {
+      "main": [[{ "node": "Notion: Em renovação + vencidos", "type": "main", "index": 0 }]]
+    },
+    "Notion: Em renovação + vencidos": {
+      "main": [[{ "node": "Planeja envios (etapa/mensagem)", "type": "main", "index": 0 }]]
+    },
+    "Planeja envios (etapa/mensagem)": {
+      "main": [[{ "node": "Loop por cliente", "type": "main", "index": 0 }]]
+    },
+    "Loop por cliente": {
+      "main": [
+        [],
+        [{ "node": "Z-API: send-text M2/M3", "type": "main", "index": 0 }]
+      ]
+    },
+    "Z-API: send-text M2/M3": {
+      "main": [[{ "node": "Notion: avança etapa", "type": "main", "index": 0 }]]
+    },
+    "Notion: avança etapa": {
+      "main": [[{ "node": "Loop por cliente", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "renovacao" },
+    { "name": "whatsapp" },
+    { "name": "zapi" }
+  ]
+}

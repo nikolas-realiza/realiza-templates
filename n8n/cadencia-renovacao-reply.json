@@ -1,0 +1,343 @@
+{
+  "name": "cadencia-renovacao-reply",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-reply",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wf3-webhook",
+      "name": "Webhook (Z-API on-message)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 320],
+      "webhookId": "whatsapp-reply"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst phone = String(body.phone || '').replace(/\\D/g, '');\nconst fromMe = body.fromMe === true || body.fromMe === 'true';\nconst text = body?.text?.message || body?.message || body?.text || '';\nconst hasText = typeof text === 'string' && text.trim().length > 0;\n\nreturn [{\n  json: {\n    phone,\n    fromMe,\n    text: hasText ? text.trim() : '',\n    shouldProcess: !fromMe && hasText && phone.length >= 10\n  }\n}];"
+      },
+      "id": "wf3-parse",
+      "name": "Parse payload Z-API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "should",
+              "leftValue": "={{ $json.shouldProcess }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf3-if-process",
+      "name": "IF processar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 320]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "getAll",
+        "databaseId": "REPLACE_NOTION_DATABASE_ID",
+        "returnAll": false,
+        "limit": 1,
+        "filters": {
+          "conditions": [
+            {
+              "key": "Telefone WhatsApp|phone_number",
+              "condition": "equals",
+              "phoneNumberValue": "={{ $json.phone }}"
+            },
+            {
+              "key": "Status Renovação|select",
+              "condition": "equals",
+              "selectValue": "Em renovação"
+            }
+          ]
+        }
+      },
+      "id": "wf3-notion-find",
+      "name": "Notion: localiza cliente",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [960, 220],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "id": "found",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "wf3-if-found",
+      "name": "IF cliente encontrado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 220]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "modelId": { "__rl": true, "value": "gpt-4o-mini", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "Você classifica respostas de clientes a uma proposta de renovação de contrato. Retorne APENAS JSON estrito no formato:\n{\"intent\":\"aceite|recusa|duvida|outro\",\"confidence\":0.0-1.0,\"reasoning\":\"breve\"}\nRegras:\n- aceite: confirmação inequívoca (\"sim\", \"pode renovar\", \"fechado\", \"aceito\").\n- recusa: \"não\", \"cancele\", \"não quero renovar\".\n- duvida: pergunta sobre preço, prazo, condições, ou pede para conversar.\n- outro: saudações, agradecimentos sem decisão, ruído."
+            },
+            {
+              "role": "user",
+              "content": "=Mensagem do cliente: \"{{ $('Parse payload Z-API').item.json.text }}\""
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0
+        }
+      },
+      "id": "wf3-llm",
+      "name": "LLM: classifica intenção",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.6,
+      "position": [1440, 220],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_OPENAI_CRED_ID",
+          "name": "OpenAI Realiza"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nlet parsed = raw.message?.content || raw.content || raw;\nif (typeof parsed === 'string') {\n  try { parsed = JSON.parse(parsed); } catch (e) { parsed = { intent: 'outro', confidence: 0, reasoning: 'parse_fail' }; }\n}\nconst intent = ['aceite','recusa','duvida','outro'].includes(parsed.intent) ? parsed.intent : 'outro';\n\nreturn [{\n  json: {\n    pageId: $('Notion: localiza cliente').item.json.id,\n    text: $('Parse payload Z-API').item.json.text,\n    phone: $('Parse payload Z-API').item.json.phone,\n    intent,\n    confidence: parsed.confidence ?? 0,\n    reasoning: parsed.reasoning || ''\n  }\n}];"
+      },
+      "id": "wf3-normalize",
+      "name": "Normaliza intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1680, 220]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.intent }}",
+        "rules": {
+          "values": [
+            { "conditions": { "string": [{ "value2": "aceite" }] }, "outputKey": "aceite" },
+            { "conditions": { "string": [{ "value2": "recusa" }] }, "outputKey": "recusa" },
+            { "conditions": { "string": [{ "value2": "duvida" }] }, "outputKey": "duvida" }
+          ]
+        },
+        "fallbackOutput": "outro"
+      },
+      "id": "wf3-switch",
+      "name": "Switch por intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1920, 220]
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Aceite WPP|checkbox", "checkboxValue": true },
+            { "key": "Status Renovação|select", "selectValue": "Aceito" },
+            { "key": "Última Resposta WPP|rich_text", "richText": "={{ $json.text }}" }
+          ]
+        }
+      },
+      "id": "wf3-update-aceite",
+      "name": "Notion: marca Aceito",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [2200, 60],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Status Renovação|select", "selectValue": "Recusou" },
+            { "key": "Última Resposta WPP|rich_text", "richText": "={{ $json.text }}" }
+          ]
+        }
+      },
+      "id": "wf3-update-recusa",
+      "name": "Notion: marca Recusou",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [2200, 220],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Última Resposta WPP|rich_text", "richText": "=[DÚVIDA] {{ $json.text }}" }
+          ]
+        }
+      },
+      "id": "wf3-update-duvida",
+      "name": "Notion: registra Dúvida",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [2200, 380],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "databasePage",
+        "operation": "update",
+        "pageId": "={{ $json.pageId }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Última Resposta WPP|rich_text", "richText": "=[OUTRO] {{ $json.text }}" }
+          ]
+        }
+      },
+      "id": "wf3-update-outro",
+      "name": "Notion: registra Outro",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2,
+      "position": [2200, 540],
+      "credentials": {
+        "notionApi": {
+          "id": "REPLACE_NOTION_CRED_ID",
+          "name": "Notion CRM2.0"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"ok\",\n  \"intent\": \"{{ $json.intent }}\",\n  \"pageId\": \"{{ $json.pageId }}\"\n}"
+      },
+      "id": "wf3-respond-ok",
+      "name": "Responde 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2480, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"ignored\"\n}"
+      },
+      "id": "wf3-respond-ignored",
+      "name": "Responde ignored",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [960, 460]
+    }
+  ],
+  "connections": {
+    "Webhook (Z-API on-message)": {
+      "main": [[{ "node": "Parse payload Z-API", "type": "main", "index": 0 }]]
+    },
+    "Parse payload Z-API": {
+      "main": [[{ "node": "IF processar?", "type": "main", "index": 0 }]]
+    },
+    "IF processar?": {
+      "main": [
+        [{ "node": "Notion: localiza cliente", "type": "main", "index": 0 }],
+        [{ "node": "Responde ignored", "type": "main", "index": 0 }]
+      ]
+    },
+    "Notion: localiza cliente": {
+      "main": [[{ "node": "IF cliente encontrado?", "type": "main", "index": 0 }]]
+    },
+    "IF cliente encontrado?": {
+      "main": [
+        [{ "node": "LLM: classifica intenção", "type": "main", "index": 0 }],
+        [{ "node": "Responde ignored", "type": "main", "index": 0 }]
+      ]
+    },
+    "LLM: classifica intenção": {
+      "main": [[{ "node": "Normaliza intent", "type": "main", "index": 0 }]]
+    },
+    "Normaliza intent": {
+      "main": [[{ "node": "Switch por intent", "type": "main", "index": 0 }]]
+    },
+    "Switch por intent": {
+      "main": [
+        [{ "node": "Notion: marca Aceito", "type": "main", "index": 0 }],
+        [{ "node": "Notion: marca Recusou", "type": "main", "index": 0 }],
+        [{ "node": "Notion: registra Dúvida", "type": "main", "index": 0 }],
+        [{ "node": "Notion: registra Outro", "type": "main", "index": 0 }]
+      ]
+    },
+    "Notion: marca Aceito": {
+      "main": [[{ "node": "Responde 200", "type": "main", "index": 0 }]]
+    },
+    "Notion: marca Recusou": {
+      "main": [[{ "node": "Responde 200", "type": "main", "index": 0 }]]
+    },
+    "Notion: registra Dúvida": {
+      "main": [[{ "node": "Responde 200", "type": "main", "index": 0 }]]
+    },
+    "Notion: registra Outro": {
+      "main": [[{ "node": "Responde 200", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "renovacao" },
+    { "name": "whatsapp" },
+    { "name": "zapi" }
+  ]
+}
